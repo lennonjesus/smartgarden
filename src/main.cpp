@@ -1,13 +1,14 @@
 // ESP32S
 
 #include <Arduino.h>
-#include <WiFi.h>
 #include "SSD1306Wire.h"
 #include "Wire.h"
 #include <DHT.h>
+#include "tasks/WiFiConnectTask.h"
+#include "tasks/HandleOtaTask.h"
 
 #define uS_TO_S_FACTOR 1000000 // conv. de microsegundos para segundos
-#define TIME_TO_SLEEP 300 // tempo de hibernacao em s
+#define TIME_TO_SLEEP 1800 // tempo de hibernacao em s
 #define ENA 2
 #define IN1 18
 #define IN2 19
@@ -18,9 +19,9 @@
 
 /* REDE */
 String THINGSPEAK_API_KEY = "";
-const char *ssid =  "";
-const char *pass =  "";
+
 const char *server = "api.thingspeak.com";
+
 WiFiClient client;
 
 /* OLED */
@@ -47,6 +48,8 @@ float temperatura = 0;
 bool hasWater = false;
 bool isMotorOn = false;
 
+int qtdDataStored = 0;
+
 void readSoilMoisture();
 void readSensorUV();
 void readWeather();
@@ -58,50 +61,58 @@ void displayMessage(String message, int milliseconds);
 void displaySoilMoisture();
 void displayWeatherAndUV();
 
-void irrigacao();
 void sendDataToServer();
 
 void hibernate();
 
-TaskHandle_t WiFiConnectTaskInstance;
+TaskHandle_t IrrigacaoTaskInstance;
 
-void WiFiConnectTask(void *arg) {
+void IrrigacaoTask(void *args) {
 
-  Serial.println((String) __func__ + " rodando em " + (String) xPortGetCoreID());
+  for (;;) {
 
-  for(;;) {
-    
-    delay(100);
+    readWaterLevel();
+    readSoilMoisture();
 
-    while (WiFi.status() != WL_CONNECTED) {
-      delay(100);
-      
-      Serial.print("Conectando em ");
-      Serial.print(ssid);
+    if (hasWater && isSoilDry) {
 
-      int timeout = 0;
+      if (!isMotorOn) {
+        Serial.println("Ligando bomba");
+        
+        digitalWrite(ENA, HIGH);
+        digitalWrite(IN1, LOW);
+        digitalWrite(IN2, HIGH);
 
-      while (WiFi.status() != WL_CONNECTED && ++timeout <= 10) {
-        digitalWrite(BUILTIN_LED, HIGH);
-        delay(500);
-        digitalWrite(BUILTIN_LED, LOW);
-        delay(500);
-        Serial.print("."); 
+        isMotorOn = true;
+
+        displayMessage("Bomba on", 1000);
       }
 
-      if (WiFi.status() != WL_CONNECTED) {
-        Serial.println(" Conexão não estabelecida. Reiniciando...");
-        // ESP.restart();
-        WiFi.reconnect();
-      }
+      Serial.println("Irrigando...");
 
-      Serial.println("");
-      Serial.print("Conectado em ");
-      Serial.print(ssid);
-      Serial.print(" com o IP ");
-      Serial.println(WiFi.localIP());
+      delay(3000);
+
+      return;
+
     }
+
+    if (isMotorOn) {
+      Serial.println("Desligando bomba");
+
+      digitalWrite(ENA, LOW);
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, LOW);
+
+      displayMessage("Bomba off", 1000);
+      
+      isMotorOn = false;
+
+      delay(1000);
+    }
+
+    delay(1000 * 60 * 60);
   }
+  
 }
 
 void setup() {
@@ -121,15 +132,29 @@ void setup() {
 
   dht.begin();
 
-  WiFi.begin(ssid, pass);
-
   delay(100);
+
+  xTaskCreatePinnedToCore(IrrigacaoTask, 
+                      "IrrigacaoTask", 
+                      1024, 
+                      &IrrigacaoTaskInstance, 
+                      3, 
+                      NULL, 
+                      PRO_CPU_NUM);
 
   xTaskCreatePinnedToCore(WiFiConnectTask, 
                       "WiFiConnectTask", 
-                      2048, 
+                      3072, 
                       &WiFiConnectTaskInstance, 
                       2, 
+                      NULL, 
+                      PRO_CPU_NUM);
+
+  xTaskCreatePinnedToCore(HandleOtaTask, 
+                      "HandleOtaTask", 
+                      2048, 
+                      &HandleOtaTaskInstance, 
+                      4, 
                       NULL, 
                       PRO_CPU_NUM);
 
@@ -160,18 +185,18 @@ void loop() {
   displayWeatherAndUV();
   delay(2000);
 
-  irrigacao();
-  delay(1000);
-
   sendDataToServer();
 
-  hibernate();
-  delay(TIME_TO_SLEEP * 1000);
+  if(qtdDataStored == 5) {
+    hibernate();
+  }
+
+  display.displayOff();
+
+  delay(1000 * 60);
+  
+  // delay(TIME_TO_SLEEP * 1000);
 }
-
-
-
-
 
 /* LEITURAS */
 void readSoilMoisture() {
@@ -277,41 +302,6 @@ void readWaterLevel() {
 /* FIM LEITURAS */ 
 
 /* ACTIONS */
-void irrigacao() {
-
-  do {
-
-    readWaterLevel();
-    readSoilMoisture();
-
-    if (!isMotorOn) {
-      Serial.println("Ligando bomba");
-      
-      digitalWrite(ENA, HIGH);
-      digitalWrite(IN1, LOW);
-      digitalWrite(IN2, HIGH);
-
-      isMotorOn = true;
-
-      displayMessage("Bomba on", 1000);
-    }
-
-    Serial.println("Irrigando...");
-  } while (hasWater && isSoilDry);
-
-  if (isMotorOn) {
-    Serial.println("Desligando bomba");
-
-    digitalWrite(ENA, LOW);
-    digitalWrite(IN1, LOW);
-    digitalWrite(IN2, LOW);
-
-    displayMessage("Bomba off", 1000);
-    
-    isMotorOn = false;
-  }
-}
-
 void sendDataToServer() {
   
   if (client.connect(server, 80)) {
@@ -346,6 +336,7 @@ void sendDataToServer() {
 
     delay(1000);
     Serial.println("Dados enviados.");
+    qtdDataStored++;
   
   } else {
     Serial.println("Falha ao enviar os dados!");
@@ -366,7 +357,7 @@ void displaySetup() {
   display.drawString(10, 0, "Smart Garden");
   display.setFont(ArialMT_Plain_10);
   display.drawString(0, 52, "SW Ver.:");
-  display.drawString(45, 52, "0.0.1");
+  display.drawString(45, 52, "0.0.2");
   display.display();
 
   delay(1000);
@@ -381,7 +372,7 @@ void displaySetup() {
     display.setTextAlignment(TEXT_ALIGN_CENTER);
     display.drawString(64, 15, String(value) + "%");
     display.display();
-    delay(20);
+    delay(50);
   }
 
   delay(500);
@@ -394,7 +385,8 @@ void displayMessage(String message, int milliseconds) {
   display.setTextAlignment(TEXT_ALIGN_LEFT);
   display.drawString(10, 0, message);
   display.display();
-  delay(milliseconds); 
+  delay(milliseconds);
+  display.clear();
 }
 
 /*  Display Soil Moisture Values on local OLED*/
