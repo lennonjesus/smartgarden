@@ -67,7 +67,15 @@ void hibernate();
 
 TaskHandle_t IrrigacaoTaskInstance;
 
+TaskHandle_t DisplayDataTaskInstance;
+
 void IrrigacaoTask(void *args) {
+
+  Serial.println((String) __func__ + " rodando em " + (String) xPortGetCoreID());
+
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
 
   for (;;) {
 
@@ -115,6 +123,19 @@ void IrrigacaoTask(void *args) {
   
 }
 
+void DisplayDataTask(void *args) {
+
+  Serial.println((String) __func__ + " rodando em " + (String) xPortGetCoreID());
+
+  for (;;) {
+    displaySoilMoisture();
+    delay(2000);
+
+    displayWeatherAndUV();
+    delay(2000);
+  }
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -122,9 +143,7 @@ void setup() {
 
   esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
 
-  pinMode(ENA, OUTPUT);
-  pinMode(IN1, OUTPUT);
-  pinMode(IN2, OUTPUT);
+
 
   pinMode(PWR_PIN_SOIL_HUM, OUTPUT);
 
@@ -157,6 +176,13 @@ void setup() {
                       4, 
                       NULL, 
                       PRO_CPU_NUM);
+  xTaskCreatePinnedToCore(DisplayDataTask, 
+                      "DisplayDataTask", 
+                      2048, 
+                      &DisplayDataTaskInstance, 
+                      4, 
+                      NULL, 
+                      PRO_CPU_NUM);
 
   displaySetup();
 }
@@ -178,12 +204,6 @@ void loop() {
 
   readWaterLevel();
   delay(500);
-
-  displaySoilMoisture();
-  delay(2000);
-
-  displayWeatherAndUV();
-  delay(2000);
 
   sendDataToServer();
 
